@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 const script = fileURLToPath(new URL("../run-codex.ps1", import.meta.url));
 const windows = process.platform === "win32";
 
-async function runFakeScript({ mode, prompt, model = "gpt-6-luna", effort = "medium", fail = false,
-  missingRoute = false }) {
+async function runFakeScript({ mode, prompt, resumeSessionId, model = "gpt-6-luna",
+  effort = "medium", fail = false, missingRoute = false }) {
   const directory = await mkdtemp(join(tmpdir(), "router-script-test-"));
   const promptFile = join(directory, "prompt.txt");
   const testScript = join(directory, "run-codex.ps1");
@@ -21,14 +21,12 @@ async function runFakeScript({ mode, prompt, model = "gpt-6-luna", effort = "med
   await copyFile(script, testScript);
   const command = `
 function node {
-  param($router, $verb, $configFlag1, $approvalPolicy, $configFlag2, $sandboxMode,
-    $flag, $report, $stdinMarker)
+  param($router)
+  $codexArgs = @($args)
+  $report = $codexArgs[[array]::IndexOf($codexArgs, '--output-last-message') + 1]
   $promptBytes = [IO.File]::ReadAllBytes($env:CODEX_ROUTER_PROMPT_FILE)
   $received = [Text.Encoding]::UTF8.GetString($promptBytes)
-  @{ router = $router; verb = $verb; flag = $flag; report = $report;
-     configFlag1 = $configFlag1; approvalPolicy = $approvalPolicy;
-     configFlag2 = $configFlag2; sandboxMode = $sandboxMode;
-     stdinMarker = $stdinMarker; prompt = $received;
+  @{ router = $router; codexArgs = $codexArgs; prompt = $received;
      promptBytes = [Convert]::ToBase64String($promptBytes);
      stdinObjects = @($input).Count; backend = $env:ROUTER_BACKEND;
      shadow = $env:CODEX_ROUTER_SHADOW; routeFile = $env:CODEX_ROUTER_ROUTE_FILE } |
@@ -50,8 +48,10 @@ function Set-Clipboard {
   param([string]$Value)
   [IO.File]::WriteAllText($env:TEST_CLIPBOARD, $Value, [Text.Encoding]::UTF8)
 }
-if ($env:TEST_MODE -eq 'File') { & $env:TEST_SCRIPT $env:TEST_PROMPT_FILE }
-else { & $env:TEST_SCRIPT -Prompt $env:TEST_PROMPT_TEXT }
+$resumeArgs = @{}
+if ($env:TEST_RESUME_SESSION_ID) { $resumeArgs.ResumeSessionId = $env:TEST_RESUME_SESSION_ID }
+if ($env:TEST_MODE -eq 'File') { & $env:TEST_SCRIPT @resumeArgs $env:TEST_PROMPT_FILE }
+else { & $env:TEST_SCRIPT @resumeArgs -Prompt $env:TEST_PROMPT_TEXT }
 $scriptExit = $LASTEXITCODE
 @{ backend = $env:ROUTER_BACKEND; shadow = $env:CODEX_ROUTER_SHADOW;
    promptFile = $env:CODEX_ROUTER_PROMPT_FILE; routeFile = $env:CODEX_ROUTER_ROUTE_FILE } |
@@ -63,6 +63,7 @@ exit $scriptExit
     encoding: "utf8",
     env: { ...process.env, TEST_SCRIPT: testScript, TEST_MODE: mode,
       TEST_PROMPT_FILE: promptFile, TEST_PROMPT_TEXT: prompt,
+      TEST_RESUME_SESSION_ID: resumeSessionId ?? "",
       TEST_RECORD: recordFile, TEST_CLIPBOARD: clipboardFile,
       TEST_RESTORED: restoredFile, TEST_FAIL: fail ? "1" : "0",
       TEST_ROUTE_MODEL: model, TEST_ROUTE_EFFORT: effort,
@@ -72,7 +73,8 @@ exit $scriptExit
       CODEX_ROUTER_ROUTE_FILE: "original-route-file" },
   });
   try {
-    return { result, record: JSON.parse((await readFile(recordFile, "utf8")).replace(/^\uFEFF/, "")),
+    return { result, record: await readFile(recordFile, "utf8")
+      .then((value) => JSON.parse(value.replace(/^\uFEFF/, ""))).catch(() => null),
       clipboard: await readFile(clipboardFile, "utf8")
         .then((value) => value.replace(/^\uFEFF/, "")).catch(() => null),
       report: await readFile(join(directory, ".codex-router", "last-report.txt"), "utf8").catch(() => null),
@@ -90,11 +92,12 @@ test("Windows helper accepts a UTF-8 prompt file and -Prompt without live Codex"
     const { result, record, clipboard, report, restored, leftovers } = await runFakeScript({ mode, prompt });
     assert.equal(result.status, 0, result.stderr);
     assert.match(record.router, /[/\\]bin[/\\]jev-codex\.mjs$/);
-    assert.deepEqual([record.verb, record.flag, record.stdinMarker],
-      ["exec", "--output-last-message", "-"]);
-    assert.deepEqual([record.configFlag1, record.approvalPolicy,
-      record.configFlag2, record.sandboxMode],
-    ["--config", 'approval_policy="never"', "--config", 'sandbox_mode="workspace-write"']);
+    assert.deepEqual(record.codexArgs.slice(0, 5), ["exec", "--config",
+      'approval_policy="never"', "--config", 'sandbox_mode="workspace-write"']);
+    assert.equal(record.codexArgs[5], "--output-last-message");
+    assert.match(record.codexArgs[6], /[/\\]\.codex-router[/\\]/);
+    assert.equal(record.codexArgs[7], "-");
+    assert.equal(record.codexArgs.length, 8);
     assert.equal(record.prompt, prompt);
     assert.equal(record.promptBytes, Buffer.from(prompt, "utf8").toString("base64"));
     assert.equal(record.stdinObjects, 0);
@@ -109,6 +112,32 @@ test("Windows helper accepts a UTF-8 prompt file and -Prompt without live Codex"
     assert.match(result.stdout, /Codex report saved: .*last-report\.txt/);
     assert.match(result.stdout, /Report copied to clipboard\./);
     assert.doesNotMatch(result.stdout, /README\.md|fake final answer/);
+  }
+});
+
+test("Windows helper resumes a session ID or thread name with either prompt form", { skip: !windows }, async () => {
+  for (const mode of ["File", "Text"]) {
+    const resumeSessionId = mode === "File"
+      ? "12345678-1234-1234-1234-123456789abc" : "desktop-thread-name";
+    const { result, record, clipboard, restored, leftovers } = await runFakeScript({
+      mode, prompt: "Continue the work", resumeSessionId,
+      model: "gpt-6-sol", effort: "high",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(record, result.stderr);
+    assert.deepEqual(record.codexArgs.slice(0, 6), ["exec", "resume", "--config",
+      'approval_policy="never"', "--config", 'sandbox_mode="workspace-write"']);
+    assert.equal(record.codexArgs[6], "--output-last-message");
+    assert.match(record.codexArgs[7], /[/\\]\.codex-router[/\\]/);
+    assert.deepEqual(record.codexArgs.slice(8), [resumeSessionId, "-"]);
+    assert.equal(record.codexArgs.includes("--model"), false);
+    assert.deepEqual([record.backend, record.shadow], ["gpt", "0"]);
+    assert.equal(record.prompt, "Continue the work");
+    assert.equal(clipboard, "fake final answer");
+    assert.deepEqual(restored, { backend: "jev", shadow: "1",
+      promptFile: "original-prompt-file", routeFile: "original-route-file" });
+    assert.deepEqual(leftovers, ["last-report.txt"]);
+    assert.match(result.stdout, /^Routed: gpt-6-sol \/ high\r?\n/);
   }
 });
 

@@ -45,6 +45,13 @@ From the router repository, `run-codex.ps1` runs a one-shot GPT-routed task with
 .\run-codex.ps1 -Prompt "指示"
 ```
 
+To continue an existing Desktop Codex session through the same GPT router, pass its session ID or thread name:
+
+```powershell
+.\run-codex.ps1 -ResumeSessionId 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' -Prompt '作業を続けてください。'
+.\run-codex.ps1 -ResumeSessionId 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' .\prompt.txt
+```
+
 It applies `approval_policy="never"` and `sandbox_mode="workspace-write"` only to that Codex invocation. Both prompt forms are passed to Codex through a temporary UTF-8 file, preserving Japanese text in Windows PowerShell 5.1. On success it prints the applied model and effort, saves the final Codex message to `.codex-router\last-report.txt`, and copies it to the Windows clipboard. The parent PowerShell environment is restored, and temporary prompt and route files are removed. The report directory is ignored by Git. A failed run shows Codex's stderr and leaves the clipboard unchanged.
 
 On each new user turn, the wrapper starts one separate official `codex exec` process using `gpt-6-luna` with `high` reasoning. The classifier receives the latest user prompt (limited to 12,000 characters), the available candidate IDs, current model, approximate context size, and routing policy. It does not automatically receive earlier conversation turns, repository files, diffs, `.env`, or credentials.

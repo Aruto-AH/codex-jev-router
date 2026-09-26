@@ -108,6 +108,9 @@ export function codexArgs(baseURL, args = [], {
     ...(backend === "gpt" ? ["--config", 'forced_login_method="chatgpt"'] : []),
   ];
   if (args[0] === "exec" || args[0] === "e") {
+    if (args[1] === "resume") {
+      return [args[0], args[1], ...routerArgs, ...args.slice(2)];
+    }
     return [args[0], ...routerArgs, ...args.slice(1)];
   }
   return [...routerArgs, ...args];

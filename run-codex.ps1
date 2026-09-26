@@ -6,7 +6,10 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Text')]
     [ValidateNotNullOrEmpty()]
-    [string]$Prompt
+    [string]$Prompt,
+
+    [ValidateNotNullOrEmpty()]
+    [string]$ResumeSessionId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,11 +43,22 @@ try {
     $env:CODEX_ROUTER_PROMPT_FILE = $temporaryPrompt
     $env:CODEX_ROUTER_ROUTE_FILE = $temporaryRoute
 
+    $codexArguments = @('exec')
+    if ($PSBoundParameters.ContainsKey('ResumeSessionId')) {
+        $codexArguments += 'resume'
+    }
+    $codexArguments += @(
+        '--config', 'approval_policy="never"',
+        '--config', 'sandbox_mode="workspace-write"',
+        '--output-last-message', $temporaryReport
+    )
+    if ($PSBoundParameters.ContainsKey('ResumeSessionId')) {
+        $codexArguments += $ResumeSessionId
+    }
+    $codexArguments += '-'
+
     $ErrorActionPreference = 'Continue'
-    & node (Join-Path $PSScriptRoot 'bin\jev-codex.mjs') exec `
-        --config 'approval_policy="never"' `
-        --config 'sandbox_mode="workspace-write"' `
-        --output-last-message $temporaryReport - 2> $temporaryError | Out-Null
+    & node (Join-Path $PSScriptRoot 'bin\jev-codex.mjs') @codexArguments 2> $temporaryError | Out-Null
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($exitCode -ne 0) {

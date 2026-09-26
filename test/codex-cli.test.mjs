@@ -60,6 +60,18 @@ test("exec receives the virtual model and local proxy provider as exec options",
     "--config", 'sandbox_mode="workspace-write"', "-"]);
 });
 
+test("exec resume receives automatic model and proxy options after the resume command", () => {
+  const args = codexArgs("http://127.0.0.1:4123", ["exec", "resume", "--config",
+    'approval_policy="never"', "--output-last-message", "report.txt", "thread-name", "-"],
+  { backend: "gpt", shadow: false });
+  assert.deepEqual(args.slice(0, 4), ["exec", "resume", "--model", "jev-router"]);
+  assert.ok(args.includes('model_provider="router"'));
+  assert.ok(args.includes('model_providers.router.base_url="http://127.0.0.1:4123"'));
+  assert.ok(args.includes('forced_login_method="chatgpt"'));
+  assert.deepEqual(args.slice(-6), ["--config", 'approval_policy="never"',
+    "--output-last-message", "report.txt", "thread-name", "-"]);
+});
+
 test("exec launch passes local proxy config and raw UTF-8 prompt bytes to fake Codex", { skip: process.platform !== "win32" }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-exec-test-"));
   const vendor = join(directory, "node_modules", "@openai", "codex", "node_modules",
