@@ -11,6 +11,7 @@ import { routeGptTurn } from "./gpt-policy.mjs";
 
 const API_BASE_URL = "https://api.openai.com/v1";
 const CHATGPT_BASE_URL = "https://chatgpt.com/backend-api/codex";
+export const MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
 const debug = (...values) => {
   if (process.env.JEV_CODEX_DEBUG === "1") console.error("[codex-jev]", ...values);
 };
@@ -114,10 +115,40 @@ export function decisionEvent(route) {
   return events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
 }
 
-async function readRequestBody(request) {
-  const chunks = [];
-  for await (const chunk of request) chunks.push(chunk);
-  return Buffer.concat(chunks);
+class RequestTooLargeError extends Error {}
+
+function readRequestBody(request, maxBytes) {
+  if (Number(request.headers["content-length"]) > maxBytes) {
+    request.pause();
+    return Promise.reject(new RequestTooLargeError());
+  }
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let bytes = 0;
+    const cleanup = () => {
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("error", onError);
+      request.off("aborted", onAborted);
+    };
+    const onData = (chunk) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        request.pause();
+        cleanup();
+        reject(new RequestTooLargeError());
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = () => { cleanup(); resolve(Buffer.concat(chunks, bytes)); };
+    const onError = (error) => { cleanup(); reject(error); };
+    const onAborted = () => { cleanup(); reject(new Error("Request aborted")); };
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("error", onError);
+    request.once("aborted", onAborted);
+  });
 }
 
 const isResponsesPath = (pathname) => /\/responses$/.test(pathname);
@@ -135,9 +166,13 @@ export async function startCodexProxy({
   shadow = process.env.CODEX_ROUTER_SHADOW === "1" ||
     (process.env.CODEX_ROUTER_SHADOW === undefined && process.env.JEV_CODEX_SHADOW === "1"),
   routeTimeoutMs = backend === "gpt" ? 45000 : 3000,
+  maxRequestBodyBytes = MAX_REQUEST_BODY_BYTES,
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("A fetch implementation is required");
+  if (!Number.isSafeInteger(maxRequestBodyBytes) || maxRequestBodyBytes < 1) {
+    throw new Error("A positive request body limit is required");
+  }
   if (!["gpt", "jev"].includes(backend)) throw new Error(`Unknown router backend: ${backend}`);
   const applyRoute = backend === "gpt" ? routeGptTurn : routeTurn;
 
@@ -244,7 +279,7 @@ export async function startCodexProxy({
     void (async () => {
       const requestURL = request.url ?? "/";
       const pathname = new URL(requestURL, "http://codex-router.local").pathname;
-      const input = await readRequestBody(request);
+      const input = await readRequestBody(request, maxRequestBodyBytes);
       let body;
       let routing;
 
@@ -433,6 +468,18 @@ export async function startCodexProxy({
         response.end();
       }
     })().catch((error) => {
+      if (error instanceof RequestTooLargeError) {
+        const ignoreRequestError = () => {};
+        request.on("error", ignoreRequestError);
+        request.once("close", () => request.off("error", ignoreRequestError));
+        if (response.destroyed) { request.destroy(); return; }
+        response.writeHead(413, { "content-type": "application/json", connection: "close" });
+        response.once("close", () => request.destroy());
+        response.end(JSON.stringify({ error: {
+          type: "request_too_large", message: "Request body exceeds the router limit.",
+        } }));
+        return;
+      }
       if (response.headersSent) {
         response.destroy(error);
         return;

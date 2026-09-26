@@ -110,6 +110,7 @@ The tests use a fake classifier subprocess, fake Jev boundary, and local fake up
 
 - Keep Codex and optional TypeSafe credentials outside the repository.
 - The proxy binds to `127.0.0.1` and does not log prompts or authorization headers.
+- The local proxy rejects request bodies larger than 64 MiB with HTTP 413.
 - Full-access mode for the main Codex session remains unrestricted.
 - GPT classification sends the bounded latest user prompt to the official Codex backend through the existing ChatGPT login. Jev mode sends the routing prompt to Jev.
 
