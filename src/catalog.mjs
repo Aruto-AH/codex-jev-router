@@ -1,18 +1,13 @@
 export const AUTO_MODEL = "jev-router";
 
 const DEFAULT_MODELS = {
-  fast: "gpt-5.6-luna",
-  balanced: "gpt-5.6-terra",
-  strong: "gpt-5.6-sol",
-  long: "gpt-6-astra",
+  fast: "gpt-6-luna",
+  strong: "gpt-6-sol",
 };
 
 export const tierForModel = (model) => {
-  const value = String(model ?? "").toLowerCase();
-  if (/(?:astra|fable|long)/.test(value)) return "long";
-  if (/(?:sol|opus|strong|max|pro)/.test(value)) return "strong";
-  if (/(?:terra|sonnet|balanced)/.test(value)) return "balanced";
-  if (/(?:luna|haiku|fast|mini|nano)/.test(value)) return "fast";
+  if (model === "gpt-6-luna") return "fast";
+  if (model === "gpt-6-sol") return "strong";
   return null;
 };
 
@@ -67,4 +62,4 @@ export function addAutoModel(catalog) {
   return { ...catalog, data: [auto, ...models] };
 }
 
-export const defaultModelForTier = (tier) => DEFAULT_MODELS[tier] ?? DEFAULT_MODELS.balanced;
+export const defaultModelForTier = (tier) => DEFAULT_MODELS[tier] ?? DEFAULT_MODELS.strong;

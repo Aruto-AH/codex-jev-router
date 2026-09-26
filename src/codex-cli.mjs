@@ -7,6 +7,10 @@ import { startCodexProxy } from "./proxy.mjs";
 
 const PROVIDER = "jev";
 const AUTO_MODEL = "jev-router";
+const hasVirtualModelArg = (args) => args.some((arg, index) =>
+  (arg === "--model" || arg === "-m") ? args[index + 1] === AUTO_MODEL :
+    arg === `--model=${AUTO_MODEL}`,
+);
 
 export function loadEnv({ cwd = process.cwd(), home = homedir() } = {}) {
   for (const file of [
@@ -43,12 +47,15 @@ export function resolveCodex() {
   return null;
 }
 
-export function codexArgs(baseURL, args = []) {
+export function codexArgs(baseURL, args = [], { shadow = process.env.JEV_CODEX_SHADOW === "1" } = {}) {
+  if (shadow && hasVirtualModelArg(args)) {
+    throw new Error("Shadow Mode requires a real model; --model jev-router cannot be used.");
+  }
   const hasExplicitModel = args.some(
     (arg) => arg === "--model" || arg === "-m" || arg.startsWith("--model="),
   );
   return [
-    ...(hasExplicitModel ? [] : ["--model", AUTO_MODEL]),
+    ...(shadow || hasExplicitModel ? [] : ["--model", AUTO_MODEL]),
     "--config",
     `model_provider="${PROVIDER}"`,
     "--config",
@@ -67,6 +74,13 @@ export function codexArgs(baseURL, args = []) {
 
 export async function runCodex({ spawnImpl = spawn } = {}) {
   loadEnv();
+  const userArgs = process.argv.slice(2);
+  const shadow = process.env.JEV_CODEX_SHADOW === "1";
+  if (shadow && hasVirtualModelArg(userArgs)) {
+    process.stderr.write("[codex-jev] Shadow Mode requires a real model; --model jev-router cannot be used.\n");
+    process.exitCode = 1;
+    return;
+  }
   const command = resolveCodex();
   if (!command) {
     process.stderr.write("[codex-jev] OpenAI Codex is not installed or is not on PATH.\n");
@@ -85,7 +99,7 @@ export async function runCodex({ spawnImpl = spawn } = {}) {
   const proxy = await startCodexProxy({
     route: (input) => askJev({ ...input, client: jev }),
   });
-  const args = codexArgs(`http://${proxy.host}:${proxy.port}`, process.argv.slice(2));
+  const args = codexArgs(`http://${proxy.host}:${proxy.port}`, userArgs, { shadow });
   const child = spawnImpl(command.file, [...command.prefix, ...args], {
     stdio: "inherit",
     shell: command.shell,

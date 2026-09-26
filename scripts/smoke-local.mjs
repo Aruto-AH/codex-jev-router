@@ -8,7 +8,12 @@ const upstream = http.createServer(async (request, response) => {
     response.end(JSON.stringify({
       models: [
         {
-          slug: "gpt-5.6-sol",
+          slug: "gpt-6-luna",
+          supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }],
+          default_reasoning_level: "medium",
+        },
+        {
+          slug: "gpt-6-sol",
           supported_reasoning_levels: [{ effort: "medium" }, { effort: "high" }, { effort: "max" }],
           default_reasoning_level: "medium",
         },
@@ -20,7 +25,7 @@ const upstream = http.createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString());
-  assert.equal(body.model, "gpt-5.6-sol");
+  assert.equal(body.model, "gpt-6-sol");
   assert.equal(body.reasoning.effort, "high");
   response.setHeader("content-type", "text/event-stream");
   response.end('event: response.created\ndata: {"type":"response.created"}\n\n');
@@ -30,11 +35,10 @@ await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
 const upstreamAddress = upstream.address();
 const proxy = await startCodexProxy({
   upstreamBaseUrl: `http://127.0.0.1:${upstreamAddress.port}/v1`,
-  route: async () => ({
-    choice: "gpt-5.6-sol",
-    confidence: 0.9,
-    metrics: { reasoningRequired: 0.75 },
-  }),
+  route: async ({ models }) => {
+    assert.deepEqual(models.map((model) => model.id), ["gpt-6-luna", "gpt-6-sol"]);
+    return { choice: "gpt-6-sol", confidence: 0.9, metrics: { reasoningRequired: 0.75 } };
+  },
 });
 
 try {
@@ -53,7 +57,7 @@ try {
   });
   const text = await response.text();
   assert.equal(response.status, 200);
-  assert.match(text, /\[Jev\] routed this turn to gpt-5\.6-sol/);
+  assert.match(text, /\[Jev\] routed this turn to gpt-6-sol/);
   console.log("local bridge smoke passed");
 } finally {
   await proxy.close();

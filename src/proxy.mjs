@@ -4,7 +4,6 @@ import { Readable } from "node:stream";
 import {
   AUTO_MODEL,
   addAutoModel,
-  defaultModelForTier,
   normalizeCatalog,
 } from "./catalog.mjs";
 import { routeTurn } from "./router-policy.mjs";
@@ -17,10 +16,8 @@ const debug = (...values) => {
 
 const FALLBACK_CANDIDATES = normalizeCatalog({
   models: [
-    { slug: "gpt-5.6-luna", supported_reasoning_levels: ["low", "medium"], default_reasoning_level: "medium" },
-    { slug: "gpt-5.6-terra", supported_reasoning_levels: ["low", "medium", "high"], default_reasoning_level: "medium" },
-    { slug: "gpt-5.6-sol", supported_reasoning_levels: ["medium", "high", "max"], default_reasoning_level: "medium" },
-    { slug: "gpt-6-astra", supported_reasoning_levels: ["medium", "high", "xhigh", "max"], default_reasoning_level: "high" },
+    { slug: "gpt-6-luna", supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"], default_reasoning_level: "medium", supported_in_api: true },
+    { slug: "gpt-6-sol", supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max", "ultra"], default_reasoning_level: "medium", supported_in_api: true },
   ],
 });
 
@@ -88,7 +85,9 @@ const writeResponseHeaders = (response, target) => {
 
 export function decisionEvent(route) {
   const confidence = route.confidence == null ? "" : `, confidence ${Number(route.confidence).toFixed(2)}`;
-  const text = `🔹 [Jev] routed this turn to ${route.model} (${route.effort} reasoning${confidence}).`;
+  const text = route.shadow
+    ? `🔹 [Jev] Jev shadow recommendation: ${route.model ?? "unavailable"} / ${route.effort ?? "unavailable"}\nActual request unchanged: ${route.actualModel ?? "unspecified"} / ${route.actualEffort ?? "unspecified"}`
+    : `🔹 [Jev] routed this turn to ${route.model} (${route.effort} reasoning${confidence}).`;
   const id = `jev-${randomUUID()}`;
   const item = {
     type: "message",
@@ -122,6 +121,8 @@ export async function startCodexProxy({
   chatgptBaseUrl = process.env.JEV_CODEX_CHATGPT_BASE_URL ?? CHATGPT_BASE_URL,
   route = async () => null,
   autoEffort = process.env.JEV_CODEX_AUTO_EFFORT !== "0",
+  shadow = process.env.JEV_CODEX_SHADOW === "1",
+  routeTimeoutMs = 3000,
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("A fetch implementation is required");
@@ -150,7 +151,7 @@ export async function startCodexProxy({
           supported_in_api: model.supported_in_api,
         }))));
         const normalized = normalizeCatalog(catalog);
-        if (normalized.length) candidates = normalized;
+        candidates = normalized;
         catalogLoaded = true;
         debug("catalog", candidates.map((candidate) => candidate.id).join(","));
       } catch {
@@ -161,6 +162,28 @@ export async function startCodexProxy({
       }
     })();
     await catalogPromise;
+  };
+
+  const decide = async ({ prompt, input, currentModel }) => {
+    const contextTokens = Math.round(JSON.stringify(input ?? []).length / 4);
+    const controller = new AbortController();
+    let timeout;
+    try {
+      return await Promise.race([
+        route({ prompt, currentModel, contextTokens, models: candidates, signal: controller.signal }),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort();
+            reject(new Error("Jev routing timed out"));
+          }, routeTimeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      if (!shadow) debug("Jev unavailable", error.message);
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
   };
 
   const server = createServer((request, response) => {
@@ -179,34 +202,61 @@ export async function startCodexProxy({
         }
       }
 
-      if (body?.model === AUTO_MODEL) {
-        await loadCatalog(request.headers);
-        const key = conversationKey(body);
-        const previous = states.get(key);
-        const prompt = newTurnPrompt(body);
-        const initialModel = candidates.find((candidate) => candidate.tier === "fast")?.id ??
-          candidates[0]?.id ??
-          defaultModelForTier("fast");
-        const currentModel = previous?.model ?? (prompt
-          ? candidates.find((candidate) => candidate.tier === "strong")?.id ?? initialModel
-          : initialModel);
-        const incomingEffort = body.reasoning?.effort ?? "medium";
+      if (shadow && body?.model === AUTO_MODEL) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { type: "shadow_virtual_model", message: "Shadow Mode requires a real model; jev-router cannot be forwarded upstream." } }));
+        return;
+      }
 
+      if (shadow && body) {
+        const key = conversationKey(body);
+        const prompt = newTurnPrompt(body);
+        let saved = states.get(key);
         if (prompt) {
-          const contextTokens = Math.round(JSON.stringify(body.input ?? []).length / 4);
-          const decision = await route({
-            prompt,
-            currentModel,
-            contextTokens,
-            models: candidates,
-          });
-          routing = routeTurn({
+          await loadCatalog(request.headers);
+          const currentModel = candidates.some((candidate) => candidate.id === body.model)
+            ? body.model
+            : saved?.recommendation?.model ?? candidates.find((candidate) => candidate.tier === "strong")?.id ?? candidates[0]?.id;
+          const decision = candidates.length
+            ? await decide({ prompt, input: body.input, currentModel })
+            : null;
+          const proposed = candidates.length ? routeTurn({
             currentModel,
             candidates,
             decision,
             autoEffort,
-            incomingEffort,
-          });
+            incomingEffort: body.reasoning?.effort ?? "medium",
+          }) : null;
+          saved = { recommendation: proposed?.reason === "jev" ? proposed : null };
+          states.set(key, saved);
+        }
+        if (saved) {
+          routing = {
+            shadow: true,
+            model: saved.recommendation?.model ?? null,
+            effort: saved.recommendation?.effort ?? null,
+            actualModel: body.model,
+            actualEffort: body.reasoning?.effort,
+          };
+        }
+      } else if (body?.model === AUTO_MODEL) {
+        await loadCatalog(request.headers);
+        if (candidates.length === 0) {
+          response.writeHead(503, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { type: "routing_unavailable", message: "The native model catalog has no GPT-6 Luna or Sol routing candidates." } }));
+          return;
+        }
+        const key = conversationKey(body);
+        const previous = states.get(key);
+        const prompt = newTurnPrompt(body);
+        const initialModel = candidates.find((candidate) => candidate.tier === "strong")?.id ?? candidates[0].id;
+        const currentModel = previous?.model ?? initialModel;
+        const incomingEffort = body.reasoning?.effort ?? "medium";
+
+        if (prompt) {
+          const decision = await decide({ prompt, input: body.input, currentModel });
+          const proposed = routeTurn({ currentModel, candidates, decision, autoEffort, incomingEffort });
+          routing = proposed?.reason === "jev" ? proposed : previous ?? proposed;
           states.set(key, routing);
         } else if (previous) {
           routing = previous;
@@ -232,7 +282,7 @@ export async function startCodexProxy({
         method: request.method,
         headers: forwardedHeaders(request.headers),
         ...(input.length && !["GET", "HEAD"].includes(request.method)
-          ? { body: body ? JSON.stringify(body) : input }
+          ? { body: body && !shadow ? JSON.stringify(body) : input }
           : {}),
       });
       debug("upstream", pathname, upstreamResponse.status, body?.model ?? "passthrough");
@@ -244,7 +294,7 @@ export async function startCodexProxy({
           supported_in_api: model.supported_in_api,
         }))));
         candidates = normalizeCatalog(catalog);
-        const augmented = addAutoModel(catalog);
+        const augmented = shadow ? catalog : addAutoModel(catalog);
         catalogLoaded = true;
         const payload = Buffer.from(JSON.stringify(augmented));
         response.statusCode = upstreamResponse.status;

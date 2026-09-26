@@ -17,9 +17,7 @@ const MAX_SCORE = COMPLEXITY_SCALE.length - 1;
 
 const TIER_GUIDANCE = {
   fast: "trivial, mechanical, or purely factual work; avoid design judgment and multi-file reasoning",
-  balanced: "ordinary day-to-day engineering with a clear, bounded shape",
   strong: "hard reasoning, ambiguity, unknown-cause debugging, security, concurrency, or high blast radius",
-  long: "very large or long-running work beyond a normal focused coding session",
 };
 
 const questionForModels = (models) =>

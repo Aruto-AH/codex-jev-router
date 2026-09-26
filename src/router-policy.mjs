@@ -1,8 +1,6 @@
 import { normalizeRequestedEffort, selectEffort } from "./effort-policy.mjs";
-import { defaultModelForTier } from "./catalog.mjs";
-
 const strongFirst = (left, right) => {
-  const order = { long: 4, strong: 3, balanced: 2, fast: 1 };
+  const order = { strong: 2, fast: 1 };
   return (order[right.tier] ?? 0) - (order[left.tier] ?? 0);
 };
 
@@ -15,33 +13,34 @@ export function routeTurn({
 } = {}) {
   const current = candidates.find((candidate) => candidate.id === currentModel);
   const chosen = candidates.find((candidate) => candidate.id === decision?.choice);
-  const fallback = current ?? [...candidates].sort(strongFirst)[0] ?? {
-    id: defaultModelForTier("balanced"),
-    tier: "balanced",
-    supportedEfforts: [],
-    defaultEffort: "medium",
-  };
+  const fallback = current ?? [...candidates].sort(strongFirst)[0];
+  if (!fallback) return null;
   const model = chosen ?? fallback;
-  const hasValidDecision = Boolean(chosen);
+  const hasValidDecision = Boolean(chosen) && (!autoEffort || (
+    typeof decision?.metrics?.reasoningRequired === "number" &&
+    Number.isFinite(decision.metrics.reasoningRequired) &&
+    decision.metrics.reasoningRequired >= 0 && decision.metrics.reasoningRequired <= 1
+  ));
+  const selected = hasValidDecision ? model : fallback;
   const reason = hasValidDecision ? "jev" : decision ? "jev-invalid" : "jev-unavailable";
 
   const effort = autoEffort && hasValidDecision
     ? selectEffort({
-        reasoningRequired: decision.metrics?.reasoningRequired ?? 0.5,
-        supportedEfforts: model.supportedEfforts,
-        defaultEffort: model.defaultEffort,
+        reasoningRequired: decision.metrics.reasoningRequired,
+        supportedEfforts: selected.supportedEfforts,
+        defaultEffort: selected.defaultEffort,
       })
     : normalizeRequestedEffort(
         incomingEffort,
-        model.supportedEfforts,
-        model.defaultEffort,
+        selected.supportedEfforts,
+        selected.defaultEffort,
       );
 
   return {
-    model: model.id,
-    tier: model.tier,
+    model: selected.id,
+    tier: selected.tier,
     effort,
-    confidence: decision?.confidence ?? null,
+    confidence: hasValidDecision ? decision?.confidence ?? null : null,
     reason,
   };
 }

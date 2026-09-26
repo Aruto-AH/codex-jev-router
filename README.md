@@ -5,7 +5,11 @@
 
 Route OpenAI Codex CLI turns through Jev. Jev selects a suitable Codex model and reasoning effort for each fresh turn.
 
-The bridge runs locally. It starts a loopback Responses API proxy, sends the routing context to Jev, and forwards the request to Codex. If Jev is unavailable, Codex continues with its current model and effort.
+The bridge runs locally. It starts a loopback Responses API proxy, sends the routing context to Jev, and forwards the request to Codex. Automatic routing offers only `gpt-6-luna` and `gpt-6-sol`. The native Codex model picker still shows its other models, and an explicit `--model` passes through.
+
+The bridge uses the native `/models` catalog when available. It routes with both allowed models if both are present, or the single allowed model if only one is present. If catalog retrieval fails, a static GPT-6 Luna/Sol catalog is used. If the native catalog succeeds but contains neither allowed model, automatic routing returns `503 routing_unavailable` instead of selecting an unrelated model.
+
+If Jev times out, throws, returns no answer, or selects an unavailable model, an existing conversation keeps its previous model and effort. On the first turn, `jev-router` resolves to `gpt-6-sol` when available, otherwise `gpt-6-luna`; its requested effort is normalized to that model's supported levels. The proxy never forwards `jev-router` upstream.
 
 ## Prerequisites
 
@@ -54,10 +58,25 @@ The wrapper forwards normal Codex arguments, including `--model`, `--sandbox`, a
 
 Without a Jev key, the wrapper still starts Codex and prints a fallback notice. Add the key when you want automatic routing.
 
+### Observe recommendations with Shadow Mode
+
+In PowerShell, enable Shadow Mode for the current session:
+
+```powershell
+$env:JEV_CODEX_SHADOW="1"
+codex-jev
+```
+
+Jev still recommends a GPT-6 Luna/Sol model and reasoning effort, but the request sent to Codex keeps its original model and effort. The wrapper lets Codex select its own model unless you pass an explicit `--model`. Shadow Mode rejects `--model jev-router` because that virtual model cannot be forwarded unchanged. To turn Shadow Mode off:
+
+```powershell
+Remove-Item Env:JEV_CODEX_SHADOW
+```
+
 For each fresh turn, the bridge adds a Codex commentary item with the selected model and reasoning effort. Codex renders this item with the same layout and colors as the rest of the conversation:
 
 ```text
-🔹 [Jev] routed this turn to gpt-5.6-sol (max reasoning, confidence 0.95).
+🔹 [Jev] routed this turn to gpt-6-sol (max reasoning, confidence 0.95).
 ```
 
 ## Reasoning-effort policy
@@ -82,6 +101,7 @@ The selected model's advertised capabilities take precedence. If a model does no
 | `JEV_API_KEY` | unset | Enables Jev routing |
 | `JEV_BASE_URL` | TypeSafe default | Overrides the Jev API endpoint |
 | `JEV_CODEX_AUTO_EFFORT` | `1` | Derives reasoning effort from Jev's score |
+| `JEV_CODEX_SHADOW` | unset | Set to `1` to observe recommendations without changing the actual model or effort |
 | `JEV_CODEX_API_BASE_URL` | OpenAI API default | Overrides the OpenAI Responses endpoint |
 | `JEV_CODEX_CHATGPT_BASE_URL` | ChatGPT Codex default | Overrides the ChatGPT Codex endpoint |
 | `JEV_CODEX_DEBUG` | unset | Logs route metadata without prompts or keys when set to `1` |
@@ -111,7 +131,7 @@ ls -l ~/.jev-codex.env
 grep -q '^JEV_API_KEY=' ~/.jev-codex.env && echo 'JEV_API_KEY is configured'
 ```
 
-The bridge fails open when Jev cannot be reached, so Codex can continue without automatic routing.
+The bridge keeps the prior route when Jev cannot be reached. For a first turn, it selects an available GPT-6 candidate as described above.
 
 ## Development
 
