@@ -17,7 +17,7 @@ const fakeCodex = [
   'const stdinChunks = [];',
   'for await (const chunk of process.stdin) stdinChunks.push(chunk);',
   'writeFileSync(process.env.TEST_RECORD, JSON.stringify({',
-  '  args, prompt: promptBytes.toString("utf8"),',
+  '  args, prompt: promptBytes.toString("utf8"), cwd: process.cwd(),',
   '  promptBytes: promptBytes.toString("base64"),',
   '  stdinBytes: Buffer.concat(stdinChunks).length,',
   '  backend: process.env.ROUTER_BACKEND,',
@@ -45,15 +45,17 @@ const fakeCodex = [
 
 async function runFakeScript({ mode, prompt, resumeSessionId, model = "gpt-6-luna",
   effort = "medium", fail = false, missingRoute = false, flood = false, delayMs = 0,
-  heartbeatIntervalMs = 80 }) {
+  heartbeatIntervalMs = 80, useCallerRepo = false }) {
   const testRoot = await mkdtemp(join(tmpdir(), "router-script-test-"));
   const directory = join(testRoot, "with space");
+  const callerRepo = join(testRoot, "caller repo with space");
   const promptFile = join(directory, "prompt.txt");
   const testScript = join(directory, "run-codex.ps1");
   const recordFile = join(directory, "record.json");
   const clipboardFile = join(directory, "clipboard.txt");
   const restoredFile = join(directory, "restored.json");
   await mkdir(join(directory, "bin"), { recursive: true });
+  if (useCallerRepo) await mkdir(join(callerRepo, ".git"), { recursive: true });
   await writeFile(promptFile, prompt, "utf8");
   await copyFile(script, testScript);
   await writeFile(join(directory, "bin", "jev-codex.mjs"), fakeCodex, "utf8");
@@ -75,6 +77,7 @@ async function runFakeScript({ mode, prompt, resumeSessionId, model = "gpt-6-lun
   const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass",
     "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
     encoding: "utf8",
+    cwd: useCallerRepo ? callerRepo : undefined,
     timeout: 15000,
     env: { ...process.env, TEST_SCRIPT: testScript, TEST_MODE: mode,
       TEST_PROMPT_FILE: promptFile, TEST_PROMPT_TEXT: prompt,
@@ -91,7 +94,7 @@ async function runFakeScript({ mode, prompt, resumeSessionId, model = "gpt-6-lun
       CODEX_ROUTER_ROUTE_FILE: "original-route-file" },
   });
   try {
-    return { result,
+    return { result, callerRepo,
       record: await readFile(recordFile, "utf8").then(JSON.parse).catch(() => null),
       clipboard: await readFile(clipboardFile, "utf8")
         .then((value) => value.replace(/^\uFEFF/, "")).catch(() => null),
@@ -115,8 +118,17 @@ function assertSuccessfulOutput(result, model, effort) {
   assert.match(result.stdout, /Codex report saved: .*last-report\.txt/);
   assert.match(result.stdout, /Report copied to clipboard\./);
   assert.doesNotMatch(result.stdout, /internal Codex output|fake final answer/);
+  assert.doesNotMatch(result.stdout, /VoidTaskResult/);
 }
 
+test("Windows helper preserves caller Git working directory and suppresses task results", { skip: !windows }, async () => {
+  const { result, record, callerRepo } = await runFakeScript({
+    mode: "Text", prompt: "Read only", useCallerRepo: true,
+  });
+  assertSuccessfulOutput(result, "gpt-6-luna", "medium");
+  assert.equal(record.cwd, callerRepo);
+  assert.doesNotMatch(result.stdout, /VoidTaskResult/);
+});
 test("Windows helper preserves new exec, prompt file and text, report, route and cleanup", { skip: !windows }, async () => {
   const prompt = "README.mdを読んで、目的を3行で説明してください。";
   for (const mode of ["File", "Text"]) {
@@ -197,6 +209,7 @@ test("Windows helper preserves Codex failure, stderr and exit code", { skip: !wi
   assert.match(result.stdout, /^Routing request\.\.\.\r?\nCodex starting\.\.\.\r?\n/);
   assert.match(result.stdout, /Codex failed after \d{2}:\d{2}/);
   assert.match(result.stderr, /Codex failed with exit code 7/);
+  assert.doesNotMatch(result.stdout, /VoidTaskResult/);
   assert.match(result.stderr, /The jev-router model is not supported/);
   assert.doesNotMatch(result.stdout, /Routed:|Codex finished|Report copied/);
 });

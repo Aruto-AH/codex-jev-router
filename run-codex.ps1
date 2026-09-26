@@ -13,6 +13,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$callerWorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath
 $previousBackend = [Environment]::GetEnvironmentVariable('ROUTER_BACKEND', 'Process')
 $previousShadow = [Environment]::GetEnvironmentVariable('CODEX_ROUTER_SHADOW', 'Process')
 $previousPromptFile = [Environment]::GetEnvironmentVariable('CODEX_ROUTER_PROMPT_FILE', 'Process')
@@ -79,6 +80,7 @@ try {
     $processArguments = @((Join-Path $PSScriptRoot 'bin\jev-codex.mjs')) + $codexArguments
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = (Get-Command node.exe -ErrorAction Stop).Source
+    $startInfo.WorkingDirectory = $callerWorkingDirectory
     $startInfo.Arguments = ($processArguments | ForEach-Object { Quote-ProcessArgument $_ }) -join ' '
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
@@ -114,8 +116,8 @@ try {
             [Threading.Tasks.Task[]]@($outputCopy, $errorCopy), 30000)) {
             throw 'Codex output streams did not close after the process exited.'
         }
-        $outputCopy.GetAwaiter().GetResult()
-        $errorCopy.GetAwaiter().GetResult()
+        [void]$outputCopy.GetAwaiter().GetResult()
+        [void]$errorCopy.GetAwaiter().GetResult()
         $exitCode = $codexProcess.ExitCode
     } finally {
         $timer.Stop()
