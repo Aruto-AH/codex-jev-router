@@ -23,7 +23,7 @@ export function normalizeCatalog(catalog) {
   return rawModelsOf(catalog)
     .map((raw) => {
       const id = raw?.slug ?? raw?.id;
-      if (!id || id === AUTO_MODEL) return null;
+      if (!id || id === AUTO_MODEL || raw.supported_in_api === false) return null;
       const supportedEfforts = Array.isArray(raw.supported_reasoning_levels)
         ? raw.supported_reasoning_levels.map(effortOf).filter(Boolean)
         : [];
@@ -37,7 +37,7 @@ export function normalizeCatalog(catalog) {
     .filter((model) => model?.tier);
 }
 
-export function addAutoModel(catalog) {
+export function addAutoModel(catalog, backend = "jev") {
   const models = Array.isArray(catalog?.models)
     ? catalog.models
     : Array.isArray(catalog?.data)
@@ -51,8 +51,10 @@ export function addAutoModel(catalog) {
     ...template,
     slug: AUTO_MODEL,
     ...(Object.hasOwn(template, "id") ? { id: AUTO_MODEL } : {}),
-    display_name: "Jev Router",
-    description: "Jev selects the model and reasoning effort for each new turn.",
+    display_name: backend === "gpt" ? "Codex Router" : "Jev Router",
+    description: backend === "gpt"
+      ? "A separate Codex classifier selects the model and reasoning effort for each new turn."
+      : "Jev selects the model and reasoning effort for each new turn.",
     visibility: "list",
     supported_in_api: true,
     priority: 0,

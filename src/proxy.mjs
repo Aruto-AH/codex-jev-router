@@ -7,6 +7,7 @@ import {
   normalizeCatalog,
 } from "./catalog.mjs";
 import { routeTurn } from "./router-policy.mjs";
+import { routeGptTurn } from "./gpt-policy.mjs";
 
 const API_BASE_URL = "https://api.openai.com/v1";
 const CHATGPT_BASE_URL = "https://chatgpt.com/backend-api/codex";
@@ -61,6 +62,12 @@ export function conversationKey(body) {
   return createHash("sha1").update(String(stable)).digest("hex").slice(0, 16);
 }
 
+function turnFingerprint(body) {
+  const index = body?.input?.findLastIndex((item) => item?.role === "user") ?? -1;
+  if (index < 0) return null;
+  return createHash("sha1").update(JSON.stringify(body.input.slice(0, index + 1))).digest("hex");
+}
+
 const headerValue = (value) => (Array.isArray(value) ? value.join(", ") : value);
 
 function forwardedHeaders(headers) {
@@ -85,10 +92,13 @@ const writeResponseHeaders = (response, target) => {
 
 export function decisionEvent(route) {
   const confidence = route.confidence == null ? "" : `, confidence ${Number(route.confidence).toFixed(2)}`;
-  const text = route.shadow
+  const gptLabel = route.reason === "gpt-unavailable" ? "Router fallback" : "Router recommendation";
+  const text = route.backend === "gpt" ? (route.shadow
+    ? `Router recommendation: ${route.model ?? "unavailable"} / ${route.effort ?? "unavailable"}\nActual request unchanged: ${route.actualModel ?? "unspecified"} / ${route.actualEffort ?? "unspecified"}\nBackend: gpt`
+    : `${gptLabel}: ${route.model} / ${route.effort}${confidence}\nBackend: gpt`) : route.shadow
     ? `🔹 [Jev] Jev shadow recommendation: ${route.model ?? "unavailable"} / ${route.effort ?? "unavailable"}\nActual request unchanged: ${route.actualModel ?? "unspecified"} / ${route.actualEffort ?? "unspecified"}`
     : `🔹 [Jev] routed this turn to ${route.model} (${route.effort} reasoning${confidence}).`;
-  const id = `jev-${randomUUID()}`;
+  const id = `${route.backend === "gpt" ? "router" : "jev"}-${randomUUID()}`;
   const item = {
     type: "message",
     role: "assistant",
@@ -117,17 +127,23 @@ export async function startCodexProxy({
   host = "127.0.0.1",
   port = 0,
   upstreamBaseUrl,
-  apiBaseUrl = process.env.JEV_CODEX_API_BASE_URL ?? API_BASE_URL,
-  chatgptBaseUrl = process.env.JEV_CODEX_CHATGPT_BASE_URL ?? CHATGPT_BASE_URL,
+  backend = process.env.ROUTER_BACKEND ?? "gpt",
+  apiBaseUrl = backend === "jev" ? process.env.JEV_CODEX_API_BASE_URL ?? API_BASE_URL : API_BASE_URL,
+  chatgptBaseUrl = backend === "jev" ? process.env.JEV_CODEX_CHATGPT_BASE_URL ?? CHATGPT_BASE_URL : CHATGPT_BASE_URL,
   route = async () => null,
-  autoEffort = process.env.JEV_CODEX_AUTO_EFFORT !== "0",
-  shadow = process.env.JEV_CODEX_SHADOW === "1",
-  routeTimeoutMs = 3000,
+  autoEffort = backend === "jev" ? process.env.JEV_CODEX_AUTO_EFFORT !== "0" : true,
+  shadow = process.env.CODEX_ROUTER_SHADOW === "1" ||
+    (process.env.CODEX_ROUTER_SHADOW === undefined && process.env.JEV_CODEX_SHADOW === "1"),
+  routeTimeoutMs = backend === "gpt" ? 45000 : 3000,
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("A fetch implementation is required");
+  if (!["gpt", "jev"].includes(backend)) throw new Error(`Unknown router backend: ${backend}`);
+  const applyRoute = backend === "gpt" ? routeGptTurn : routeTurn;
 
   const states = new Map();
+  const gptStates = new Map();
+  let lastAppliedRoute = null;
   let candidates = FALLBACK_CANDIDATES;
   let catalogLoaded = false;
   let catalogPromise;
@@ -164,32 +180,70 @@ export async function startCodexProxy({
     await catalogPromise;
   };
 
-  const decide = async ({ prompt, input, currentModel }) => {
+  const decide = async ({ prompt, input, currentModel, models = candidates }) => {
+    if (process.env.CODEX_ROUTER_CLASSIFIER === "1") return null;
     const contextTokens = Math.round(JSON.stringify(input ?? []).length / 4);
     const controller = new AbortController();
     let timeout;
     try {
       return await Promise.race([
-        route({ prompt, currentModel, contextTokens, models: candidates, signal: controller.signal }),
+        route({ prompt, currentModel, contextTokens, models, signal: controller.signal }),
         new Promise((_, reject) => {
           timeout = setTimeout(() => {
             controller.abort();
-            reject(new Error("Jev routing timed out"));
+            reject(new Error(`${backend} routing timed out`));
           }, routeTimeoutMs);
         }),
       ]);
     } catch (error) {
-      if (!shadow) debug("Jev unavailable", error.message);
+      if (!shadow) debug(`${backend} unavailable`, error.message);
       return null;
     } finally {
       clearTimeout(timeout);
     }
   };
 
+  const gptTurn = async (key, fingerprint, prompt, body) => {
+    let state = gptStates.get(key);
+    if (!state) {
+      state = { generation: 0, currentRoute: null, turns: new Map() };
+      gptStates.set(key, state);
+    }
+    let turn = state.turns.get(fingerprint);
+    if (turn) return turn.pending ?? turn.settledRoute;
+    if (!prompt) return null;
+
+    const generation = ++state.generation;
+    const models = [...candidates];
+    const previous = state.currentRoute;
+    const initialModel = models.find((model) => model.tier === "strong")?.id ?? models[0]?.id;
+    const currentModel = shadow && models.some((model) => model.id === body.model)
+      ? body.model : previous?.model ?? initialModel;
+    turn = { pending: null, settledRoute: null, recommendation: null, generation };
+    state.turns.set(fingerprint, turn);
+    turn.pending = (async () => {
+      const decision = models.length ? await decide({
+        prompt, input: body.input, currentModel, models,
+      }) : null;
+      const proposed = models.length ? routeGptTurn({
+        prompt, currentModel, candidates: models, decision, autoEffort,
+        incomingEffort: body.reasoning?.effort ?? "medium",
+      }) : null;
+      const valid = proposed?.reason === "gpt" || proposed?.reason === "gpt-floor";
+      turn.recommendation = valid ? proposed : null;
+      turn.settledRoute = { ...(valid ? proposed : previous ?? proposed), backend,
+        turnFingerprint: fingerprint };
+      if (state.generation === turn.generation && !shadow) state.currentRoute = turn.settledRoute;
+      turn.pending = null;
+      return turn.settledRoute;
+    })();
+    return turn.pending;
+  };
+
   const server = createServer((request, response) => {
     void (async () => {
       const requestURL = request.url ?? "/";
-      const pathname = new URL(requestURL, "http://jev-codex.local").pathname;
+      const pathname = new URL(requestURL, "http://codex-router.local").pathname;
       const input = await readRequestBody(request);
       let body;
       let routing;
@@ -208,7 +262,19 @@ export async function startCodexProxy({
         return;
       }
 
-      if (shadow && body) {
+      if (shadow && body && backend === "gpt") {
+        const key = conversationKey(body);
+        const prompt = newTurnPrompt(body);
+        const fingerprint = turnFingerprint(body);
+        if (prompt && !gptStates.get(key)?.turns.has(fingerprint)) await loadCatalog(request.headers);
+        const turnRoute = await gptTurn(key, fingerprint, prompt, body);
+        if (turnRoute) {
+          const recommendation = gptStates.get(key).turns.get(fingerprint)?.recommendation;
+          routing = { shadow: true, backend, model: recommendation?.model ?? null,
+            effort: recommendation?.effort ?? null, actualModel: body.model,
+            actualEffort: body.reasoning?.effort };
+        }
+      } else if (shadow && body) {
         const key = conversationKey(body);
         const prompt = newTurnPrompt(body);
         let saved = states.get(key);
@@ -220,19 +286,22 @@ export async function startCodexProxy({
           const decision = candidates.length
             ? await decide({ prompt, input: body.input, currentModel })
             : null;
-          const proposed = candidates.length ? routeTurn({
+          const proposed = candidates.length ? applyRoute({
+            prompt,
             currentModel,
             candidates,
             decision,
             autoEffort,
             incomingEffort: body.reasoning?.effort ?? "medium",
           }) : null;
-          saved = { recommendation: proposed?.reason === "jev" ? proposed : null };
+          saved = { recommendation: proposed?.reason === "jev" ? proposed : null,
+            turnFingerprint: turnFingerprint(body) };
           states.set(key, saved);
         }
         if (saved) {
           routing = {
             shadow: true,
+            backend,
             model: saved.recommendation?.model ?? null,
             effort: saved.recommendation?.effort ?? null,
             actualModel: body.model,
@@ -247,27 +316,33 @@ export async function startCodexProxy({
           return;
         }
         const key = conversationKey(body);
-        const previous = states.get(key);
         const prompt = newTurnPrompt(body);
-        const initialModel = candidates.find((candidate) => candidate.tier === "strong")?.id ?? candidates[0].id;
-        const currentModel = previous?.model ?? initialModel;
-        const incomingEffort = body.reasoning?.effort ?? "medium";
-
-        if (prompt) {
-          const decision = await decide({ prompt, input: body.input, currentModel });
-          const proposed = routeTurn({ currentModel, candidates, decision, autoEffort, incomingEffort });
-          routing = proposed?.reason === "jev" ? proposed : previous ?? proposed;
-          states.set(key, routing);
-        } else if (previous) {
-          routing = previous;
+        if (backend === "gpt") {
+          routing = await gptTurn(key, turnFingerprint(body), prompt, body);
+          if (!routing) {
+            const state = gptStates.get(key);
+            const initialModel = candidates.find((candidate) => candidate.tier === "strong")?.id ?? candidates[0].id;
+            routing = state?.currentRoute ?? { ...routeGptTurn({ currentModel: initialModel,
+              candidates, decision: null, autoEffort: false,
+              incomingEffort: body.reasoning?.effort ?? "medium" }), backend };
+          }
         } else {
-          routing = routeTurn({
-            currentModel,
-            candidates,
-            decision: null,
-            autoEffort: false,
-            incomingEffort,
-          });
+          const previous = states.get(key);
+          const initialModel = candidates.find((candidate) => candidate.tier === "strong")?.id ?? candidates[0].id;
+          const currentModel = previous?.model ?? initialModel;
+          const incomingEffort = body.reasoning?.effort ?? "medium";
+          if (prompt) {
+            const decision = await decide({ prompt, input: body.input, currentModel });
+            const proposed = applyRoute({ currentModel, candidates, decision, autoEffort, incomingEffort });
+            routing = proposed?.reason === backend ? proposed : previous ?? proposed;
+            routing = { ...routing, backend, turnFingerprint: turnFingerprint(body) };
+            states.set(key, routing);
+          } else if (previous) {
+            routing = previous;
+          } else {
+            routing = { ...applyRoute({ currentModel, candidates, decision: null,
+              autoEffort: false, incomingEffort }), backend };
+          }
         }
 
         body.model = routing.model;
@@ -285,6 +360,9 @@ export async function startCodexProxy({
           ? { body: body && !shadow ? JSON.stringify(body) : input }
           : {}),
       });
+      if (routing && upstreamResponse.ok && isResponsesPath(pathname)) {
+        lastAppliedRoute = { model: body.model, effort: body.reasoning?.effort ?? null };
+      }
       debug("upstream", pathname, upstreamResponse.status, body?.model ?? "passthrough");
 
       if (isModelsPath(pathname) && upstreamResponse.ok) {
@@ -294,7 +372,7 @@ export async function startCodexProxy({
           supported_in_api: model.supported_in_api,
         }))));
         candidates = normalizeCatalog(catalog);
-        const augmented = shadow ? catalog : addAutoModel(catalog);
+        const augmented = shadow ? catalog : addAutoModel(catalog, backend);
         catalogLoaded = true;
         const payload = Buffer.from(JSON.stringify(augmented));
         response.statusCode = upstreamResponse.status;
@@ -369,6 +447,7 @@ export async function startCodexProxy({
   return {
     host,
     port: address.port,
+    getLastAppliedRoute: () => lastAppliedRoute && { ...lastAppliedRoute },
     close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
   };
 }

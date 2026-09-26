@@ -49,3 +49,13 @@ test("filters unrelated native models without changing the picker catalog", () =
   assert.deepEqual(normalizeCatalog(catalog).map((model) => model.id), ["gpt-6-luna", "gpt-6-sol"]);
   assert.deepEqual(addAutoModel(catalog).models.slice(1), catalog.models);
 });
+
+test("excludes exact routing models when native catalog marks them unsupported in API", () => {
+  const catalog = { models: [
+    { slug: "gpt-6-luna", supported_in_api: false },
+    { slug: "gpt-6-sol", supported_in_api: true },
+    { slug: "gpt-6-astra", supported_in_api: true },
+  ] };
+  assert.deepEqual(normalizeCatalog(catalog).map((model) => model.id), ["gpt-6-sol"]);
+  assert.deepEqual(addAutoModel(catalog).models.slice(1), catalog.models);
+});

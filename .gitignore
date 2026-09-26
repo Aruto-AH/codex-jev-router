@@ -4,3 +4,4 @@ node_modules/
 !.env.example
 *.log
 .jev-codex-dump/
+.codex-router/

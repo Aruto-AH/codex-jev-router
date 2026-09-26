@@ -3,161 +3,116 @@
 [![CI](https://github.com/tiandee/codex-jev-router/actions/workflows/ci.yml/badge.svg)](https://github.com/tiandee/codex-jev-router/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Route OpenAI Codex CLI turns through Jev. Jev selects a suitable Codex model and reasoning effort for each fresh turn.
+Route OpenAI Codex CLI turns through a separate Codex classifier. GPT routing is the default; the earlier Jev backend remains available with `ROUTER_BACKEND=jev`.
 
-The bridge runs locally. It starts a loopback Responses API proxy, sends the routing context to Jev, and forwards the request to Codex. Automatic routing offers only `gpt-6-luna` and `gpt-6-sol`. The native Codex model picker still shows its other models, and an explicit `--model` passes through.
+The wrapper starts a local loopback Responses API proxy. Automatic routing selects `gpt-6-luna` or `gpt-6-sol` and a supported reasoning effort for each new user turn. Tool continuations reuse the route. Explicit `--model` selections pass through without automatic routing.
 
-The bridge uses the native `/models` catalog when available. It routes with both allowed models if both are present, or the single allowed model if only one is present. If catalog retrieval fails, a static GPT-6 Luna/Sol catalog is used. If the native catalog succeeds but contains neither allowed model, automatic routing returns `503 routing_unavailable` instead of selecting an unrelated model.
-
-If Jev times out, throws, returns no answer, or selects an unavailable model, an existing conversation keeps its previous model and effort. On the first turn, `jev-router` resolves to `gpt-6-sol` when available, otherwise `gpt-6-luna`; its requested effort is normalized to that model's supported levels. The proxy never forwards `jev-router` upstream.
+The virtual model `jev-router` is retained for compatibility and appears as “Codex Router” in GPT mode. The proxy never forwards this virtual ID upstream. If classification fails, a previous route is preserved. On the first virtual-model turn, the proxy uses Sol when available, then Luna. If the native model catalog contains neither candidate, it returns `503 routing_unavailable` instead of choosing an unrelated model. If the catalog request itself fails, a static Luna/Sol capability fallback is used.
 
 ## Prerequisites
 
+- Windows 11 and PowerShell
 - Node.js 20 or newer
-- OpenAI Codex CLI installed and available as `codex` on your `PATH`
-- Codex authentication configured
-- A Jev or TypeSafe API key
+- npm-installed official OpenAI Codex CLI on `PATH` (`codex.cmd` or its official `codex.exe`)
+- Existing ChatGPT/Codex login for GPT mode; no new OpenAI API key is needed
+- Jev or TypeSafe API key only for optional Jev mode
 
-This project is open source under the MIT License. The package is not published to npm; install it from the public GitHub repository with the steps below.
+This MIT-licensed package is not published to npm. Install it from source:
 
-## Install from source
-
-Clone the repository, install its dependencies, and create the global `codex-jev` command:
-
-```bash
+```powershell
 git clone https://github.com/tiandee/codex-jev-router.git
 cd codex-jev-router
-npm install
-npm link
-codex-jev --version
+npm.cmd install
+npm.cmd link
+codex-router --version
 ```
 
-If your GitHub account uses SSH, replace the clone URL with the SSH URL configured for your account.
+`codex-router` is the recommended entry point. `codex-jev` remains a compatible alias. Both use GPT mode by default.
 
-## Configure the Jev key
+## GPT routing
 
-Store the key outside the repository. The bridge loads `~/.jev-codex.env` automatically:
-
-```bash
-printf '%s\n' 'JEV_API_KEY=your_typesafe_api_key' > ~/.jev-codex.env
-chmod 600 ~/.jev-codex.env
-```
-
-You can also export `JEV_API_KEY` in the shell that starts Codex. Do not commit the key or place it in a tracked file.
-
-## Run Codex with routing
-
-Change to the project where you want to work, then start Codex through the wrapper:
-
-```bash
-cd /path/to/your/project
-codex-jev
-```
-
-The wrapper forwards normal Codex arguments, including `--model`, `--sandbox`, and `--dangerously-bypass-approvals-and-sandbox`.
-
-Without a Jev key, the wrapper still starts Codex and prints a fallback notice. Add the key when you want automatic routing.
-
-### Observe recommendations with Shadow Mode
-
-In PowerShell, enable Shadow Mode for the current session:
+Start the wrapper in the project where you want to work:
 
 ```powershell
-$env:JEV_CODEX_SHADOW="1"
-codex-jev
+Set-Location C:\path\to\your\project
+codex-router
 ```
 
-Jev still recommends a GPT-6 Luna/Sol model and reasoning effort, but the request sent to Codex keeps its original model and effort. The wrapper lets Codex select its own model unless you pass an explicit `--model`. Shadow Mode rejects `--model jev-router` because that virtual model cannot be forwarded unchanged. To turn Shadow Mode off:
+From the router repository, `run-codex.ps1` runs a one-shot GPT-routed task without Shadow Mode:
 
 ```powershell
-Remove-Item Env:JEV_CODEX_SHADOW
+.\run-codex.ps1 .\prompt.txt
+.\run-codex.ps1 -Prompt "指示"
 ```
 
-For each fresh turn, the bridge adds a Codex commentary item with the selected model and reasoning effort. Codex renders this item with the same layout and colors as the rest of the conversation:
+It applies `approval_policy="never"` and `sandbox_mode="workspace-write"` only to that Codex invocation. Both prompt forms are passed to Codex through a temporary UTF-8 file, preserving Japanese text in Windows PowerShell 5.1. On success it prints the applied model and effort, saves the final Codex message to `.codex-router\last-report.txt`, and copies it to the Windows clipboard. The parent PowerShell environment is restored, and temporary prompt and route files are removed. The report directory is ignored by Git. A failed run shows Codex's stderr and leaves the clipboard unchanged.
+
+On each new user turn, the wrapper starts one separate official `codex exec` process using `gpt-6-luna` with `high` reasoning. The classifier receives the latest user prompt (limited to 12,000 characters), the available candidate IDs, current model, approximate context size, and routing policy. It does not automatically receive earlier conversation turns, repository files, diffs, `.env`, or credentials.
+
+The classifier uses the existing ChatGPT login. It runs with an ephemeral session, ignored user config and rules, an empty temporary working directory, a read-only sandbox, no approvals, disabled web search, shell, apps, plugins, and multi-agent features, and a strict JSON Schema response. Its process environment omits inherited OpenAI and Codex API credentials and router variables. It explicitly selects the official `openai` provider; the loopback proxy configuration used by the parent Codex is not inherited. A recursion guard skips classification if the wrapper is entered by a classifier process. The temporary schema and response files are removed after the run.
+
+The routing policy chooses the least costly model likely to complete correctly in one pass. Luna is favored for inspection, status, short explanations, wording, local changes, routine work, and bounded implementation with direct verification. Sol is favored for architecture, unclear debugging, security-sensitive work, concurrency, migrations, large refactors, cross-cutting work, final integration, and critical review. Task length, file count, and the mere presence of code do not force Sol. A small local safety floor raises low-confidence or high-risk implementation decisions to Sol. Effort is limited to `low`, `medium`, `high`, or `max` and normalized to the selected model's native `supported_reasoning_levels`.
+
+## Optional Jev mode
+
+Set `ROUTER_BACKEND=jev` before starting the wrapper. Jev mode retains the existing Jev request, scoring, timeout, and fail-open behavior. Store its key outside the repository, for example in `$HOME\.jev-codex.env`:
+
+```powershell
+Set-Content -Path "$HOME\.jev-codex.env" -Value 'JEV_API_KEY=your_typesafe_api_key'
+```
+
+`JEV_API_KEY` may also be exported in the shell. Do not commit the key. Without it, Jev mode uses the normal first-turn fallback. `JEV_CODEX_AUTO_EFFORT=0` preserves Codex's incoming effort in Jev mode; otherwise Jev's `reasoning_required` score maps to `low` (< 0.30), `medium` (< 0.60), `high` (< 0.85), or `max`.
+
+## Shadow Mode
+
+Shadow Mode runs the selected classifier and shows its recommendation while forwarding the actual request unchanged:
+
+```powershell
+$env:CODEX_ROUTER_SHADOW="1"
+codex-router
+```
+
+Example GPT commentary:
 
 ```text
-🔹 [Jev] routed this turn to gpt-6-sol (max reasoning, confidence 0.95).
+Router recommendation: gpt-6-luna / medium
+Actual request unchanged: gpt-6-sol / high
+Backend: gpt
 ```
 
-## Reasoning-effort policy
-
-Automatic effort selection is enabled by default. The bridge maps Jev's `reasoning_required` score as follows:
-
-```text
-reasoning_required < 0.30  -> low
-reasoning_required < 0.60  -> medium
-reasoning_required < 0.85  -> high
-otherwise                   -> max
-```
-
-Set `JEV_CODEX_AUTO_EFFORT=0` to preserve the effort selected in Codex.
-
-The selected model's advertised capabilities take precedence. If a model does not support the requested effort, the bridge chooses the strongest supported lower level.
+The older `JEV_CODEX_SHADOW=1` is supported as an alias. Shadow Mode rejects explicit `--model jev-router`, since a virtual model cannot be forwarded unchanged. Remove the environment variable to turn Shadow Mode off.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `JEV_API_KEY` | unset | Enables Jev routing |
-| `JEV_BASE_URL` | TypeSafe default | Overrides the Jev API endpoint |
-| `JEV_CODEX_AUTO_EFFORT` | `1` | Derives reasoning effort from Jev's score |
-| `JEV_CODEX_SHADOW` | unset | Set to `1` to observe recommendations without changing the actual model or effort |
-| `JEV_CODEX_API_BASE_URL` | OpenAI API default | Overrides the OpenAI Responses endpoint |
-| `JEV_CODEX_CHATGPT_BASE_URL` | ChatGPT Codex default | Overrides the ChatGPT Codex endpoint |
-| `JEV_CODEX_DEBUG` | unset | Logs route metadata without prompts or keys when set to `1` |
-
-## Troubleshooting
-
-### `codex-jev: command not found`
-
-Run `npm link` from the cloned repository. If the command remains unavailable, add the npm global bin directory to your `PATH`:
-
-```bash
-npm prefix -g
-```
-
-On macOS with Homebrew, the directory is commonly `/opt/homebrew/bin`.
-
-### Codex is not installed or is not on `PATH`
-
-Run `codex --version` first. Install and authenticate the OpenAI Codex CLI, then run `codex-jev` again.
-
-### Codex starts without routing
-
-Check that the key file exists and has the expected variable:
-
-```bash
-ls -l ~/.jev-codex.env
-grep -q '^JEV_API_KEY=' ~/.jev-codex.env && echo 'JEV_API_KEY is configured'
-```
-
-The bridge keeps the prior route when Jev cannot be reached. For a first turn, it selects an available GPT-6 candidate as described above.
+| `ROUTER_BACKEND` | `gpt` | Choose `gpt` or `jev` |
+| `CODEX_ROUTER_SHADOW` | unset | Set to `1` for non-mutating recommendations |
+| `JEV_CODEX_SHADOW` | unset | Legacy Shadow Mode alias |
+| `JEV_API_KEY` | unset | Enable optional Jev mode |
+| `JEV_BASE_URL` | TypeSafe default | Override Jev endpoint |
+| `JEV_CODEX_AUTO_EFFORT` | `1` | Derive Jev effort from reasoning score |
+| `JEV_CODEX_API_BASE_URL` | OpenAI API default | Override the upstream in Jev mode only |
+| `JEV_CODEX_CHATGPT_BASE_URL` | ChatGPT Codex default | Override the upstream in Jev mode only |
+| `JEV_CODEX_DEBUG` | unset | Log route metadata without prompts or keys when `1` |
 
 ## Development
 
-Run the local checks from the repository root:
-
-```bash
-npm test
-npm run smoke
-npm audit --omit=dev
+```powershell
+npm.cmd test
+npm.cmd run smoke
+npm.cmd audit --omit=dev
 ```
 
-The tests use a fake Jev decision boundary and a local fake upstream. They do not require an API key.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, required checks, and pull request expectations.
+The tests use a fake classifier subprocess, fake Jev boundary, and local fake upstream. They do not consume Codex quota. The smoke check also uses a local fake upstream.
 
 ## Security notes
 
-- Keep TypeSafe and Codex credentials outside the repository.
+- Keep Codex and optional TypeSafe credentials outside the repository.
 - The proxy binds to `127.0.0.1` and does not log prompts or authorization headers.
-- Full-access Codex mode remains unrestricted. The bridge does not make it safer.
-- Jev receives the text needed to make the routing decision. Do not route sensitive prompts through Jev unless that data flow is acceptable.
+- Full-access mode for the main Codex session remains unrestricted.
+- GPT classification sends the bounded latest user prompt to the official Codex backend through the existing ChatGPT login. Jev mode sends the routing prompt to Jev.
 
-To report a vulnerability privately, see [SECURITY.md](SECURITY.md).
-
-## License
+Report vulnerabilities privately using [SECURITY.md](SECURITY.md).
 
 This project is licensed under the [MIT License](LICENSE).

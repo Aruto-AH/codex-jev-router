@@ -34,6 +34,7 @@ const upstream = http.createServer(async (request, response) => {
 await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
 const upstreamAddress = upstream.address();
 const proxy = await startCodexProxy({
+  backend: "jev",
   upstreamBaseUrl: `http://127.0.0.1:${upstreamAddress.port}/v1`,
   route: async ({ models }) => {
     assert.deepEqual(models.map((model) => model.id), ["gpt-6-luna", "gpt-6-sol"]);

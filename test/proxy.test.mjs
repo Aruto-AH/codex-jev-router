@@ -48,6 +48,7 @@ test("serves a Jev model entry and rewrites model plus effort while preserving s
   });
   const upstreamBase = await listen(upstream);
   const proxy = await startCodexProxy({
+    backend: "jev",
     upstreamBaseUrl: `${upstreamBase}/v1`,
     route: async () => ({
       choice: "gpt-6-sol",
@@ -125,7 +126,7 @@ async function withProxy({ catalog, route, routeTimeoutMs = 3000, autoEffort = t
     response.end('event: response.created\ndata: {"type":"response.created"}\n\n');
   });
   const base = await listen(upstream);
-  const proxy = await startCodexProxy({ upstreamBaseUrl: `${base}/v1`, route, routeTimeoutMs, autoEffort, shadow });
+  const proxy = await startCodexProxy({ backend: "jev", upstreamBaseUrl: `${base}/v1`, route, routeTimeoutMs, autoEffort, shadow });
   const send = async (body) => fetch(`http://127.0.0.1:${proxy.port}/responses`, {
     method: "POST", headers: { "content-type": "application/json", authorization: "Bearer fake-test-token" },
     body: JSON.stringify(body),

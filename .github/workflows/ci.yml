@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     name: Node ${{ matrix.node-version }}
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
@@ -28,13 +28,13 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm.cmd ci
 
       - name: Run unit and integration tests
-        run: npm test
+        run: npm.cmd test
 
       - name: Run local smoke test
-        run: npm run smoke
+        run: npm.cmd run smoke
 
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+        run: npm.cmd audit --omit=dev --audit-level=high

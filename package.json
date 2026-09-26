@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "An independent Jev routing bridge for OpenAI Codex CLI.",
+  "description": "A GPT-native or Jev routing bridge for OpenAI Codex CLI.",
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/tiandee/codex-jev-router.git"
@@ -16,6 +16,7 @@
     "node": ">=20"
   },
   "bin": {
+    "codex-router": "./bin/jev-codex.mjs",
     "codex-jev": "./bin/jev-codex.mjs"
   },
   "scripts": {
